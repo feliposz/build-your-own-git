@@ -2,39 +2,46 @@ package main
 
 import (
 	"fmt"
-	// Uncomment this block to pass the first stage!
-	// "os"
+	"os"
+	"path/filepath"
 )
 
-// Usage: your_git.sh <command> <arg1> <arg2> ...
 func main() {
-	// You can use print statements as follows for debugging, they'll be visible when running tests.
-	fmt.Println("Logs from your program will appear here!")
+	if len(os.Args) < 2 {
+		printUsageAndExit()
+	}
 
-	// Uncomment this block to pass the first stage!
-	//
-	// if len(os.Args) < 2 {
-	// 	fmt.Fprintf(os.Stderr, "usage: mygit <command> [<args>...]\n")
-	// 	os.Exit(1)
-	// }
-	//
-	// switch command := os.Args[1]; command {
-	// case "init":
-	// 	for _, dir := range []string{".git", ".git/objects", ".git/refs"} {
-	// 		if err := os.MkdirAll(dir, 0755); err != nil {
-	// 			fmt.Fprintf(os.Stderr, "Error creating directory: %s\n", err)
-	// 		}
-	// 	}
-	//
-	// 	headFileContents := []byte("ref: refs/heads/main\n")
-	// 	if err := os.WriteFile(".git/HEAD", headFileContents, 0644); err != nil {
-	// 		fmt.Fprintf(os.Stderr, "Error writing file: %s\n", err)
-	// 	}
-	//
-	// 	fmt.Println("Initialized git directory")
-	//
-	// default:
-	// 	fmt.Fprintf(os.Stderr, "Unknown command %s\n", command)
-	// 	os.Exit(1)
-	// }
+	switch os.Args[1] {
+	case "init":
+		gitInit()
+	default:
+		fmt.Printf("invalid command: %s\n", os.Args[1])
+		printUsageAndExit()
+	}
+}
+
+func printUsageAndExit() {
+	fmt.Printf("usage: %s <command> [<args>...]", filepath.Base(os.Args[0]))
+	os.Exit(1)
+}
+
+func gitInit() {
+	initialDirectories := []string{".git", ".git/objects", ".git/refs"}
+	for _, directory := range initialDirectories {
+		err := os.Mkdir(directory, 0755)
+		if err != nil {
+			fmt.Printf("error creating directory %s: %s", directory, err)
+			os.Exit(1)
+		}
+	}
+	headPath := ".git/HEAD"
+	headContent := "ref: refs/heads/master\n"
+	err := os.WriteFile(headPath, []byte(headContent), 0644)
+	if err != nil {
+		fmt.Printf("error writing to file %s: %s", headPath, err)
+		os.Exit(1)
+	}
+	cwd, _ := os.Getwd()
+	repository := filepath.Join(cwd, ".git")
+	fmt.Printf("Initialized empty Git repository in %s\n", repository)
 }
