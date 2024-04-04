@@ -5,6 +5,7 @@ import (
 	"compress/zlib"
 	"crypto/sha1"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,6 +23,8 @@ func main() {
 		gitCatFile()
 	case "hash-object":
 		gitHashObject()
+	case "ls-tree":
+		gitListTree()
 	default:
 		fmt.Printf("invalid command: %s\n", os.Args[1])
 		printUsageAndExit("")
@@ -126,15 +129,9 @@ func gitCatFile() {
 		fatal("error: object file %s is empty", objPath)
 	}
 
-	buffer := make([]byte, objSize)
-	_, err = reader.Read(buffer)
-	if err != nil {
-		fatal(err.Error())
-	}
-
 	// default action "-p" (pretty-print)
 
-	os.Stdout.Write(buffer)
+	io.Copy(os.Stdout, reader)
 }
 
 func gitHashObject() {
@@ -204,4 +201,124 @@ func gitHashObject() {
 	}
 
 	fmt.Println(objName)
+}
+
+func gitListTree() {
+	if len(os.Args) < 3 || (len(os.Args) == 4 && os.Args[2] != "--name-only" && os.Args[2] != "--object-only" && os.Args[2] != "-l") {
+		printUsageAndExit("ls-tree (-l | --name-only | --object-only) <tree_sha>")
+	}
+
+	var nameOnly, objectOnly, longFormat bool
+	var objName string
+	if os.Args[2] == "--name-only" {
+		objName = os.Args[3]
+		nameOnly = true
+	} else if os.Args[2] == "--object-only" {
+		objName = os.Args[3]
+		objectOnly = true
+	} else if os.Args[2] == "-l" {
+		objName = os.Args[3]
+		longFormat = true
+	} else {
+		objName = os.Args[2]
+	}
+
+	if len(objName) != 40 {
+		fatal("fatal: Not a valid object name %s\n", objName)
+	}
+
+	objDir := filepath.Join(".git", "objects", objName[:2])
+	info, err := os.Stat(objDir)
+	if err != nil {
+		fatal(err.Error())
+	}
+	if !info.IsDir() {
+		fatal("fatal: not a directory %s\n", objDir)
+	}
+
+	objPath := filepath.Join(objDir, objName[2:])
+	file, err := os.Open(objPath)
+	if err != nil {
+		fatal(err.Error())
+	}
+	defer file.Close()
+
+	zipReader, err := zlib.NewReader(file)
+	if err != nil {
+		fatal(err.Error())
+	}
+
+	reader := bufio.NewReader(zipReader)
+	objType, _ := reader.ReadString(' ')
+	objType = objType[:len(objType)-1]
+
+	if objType != "tree" {
+		fatal("object type not supported: %q\n", objType)
+	}
+
+	lengthStr, err := reader.ReadString(0)
+	lengthStr = lengthStr[:len(lengthStr)-1]
+	if err != nil {
+		fatal(err.Error())
+	}
+	objSize, _ := strconv.ParseInt(lengthStr, 10, 64)
+
+	if objSize == 0 {
+		fatal("error: object file %s is empty", objPath)
+	}
+
+	hash := make([]byte, 20)
+	for {
+		fileMode, err := reader.ReadString(' ')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			fatal(err.Error())
+		}
+		name, err := reader.ReadString('\000')
+		if err != nil {
+			fatal(err.Error())
+		}
+		name = name[:len(name)-1]
+		_, err = reader.Read(hash)
+		if err != nil {
+			fatal(err.Error())
+		}
+		if nameOnly {
+			fmt.Println(name)
+		} else if objectOnly {
+			fmt.Printf("%x\n", hash)
+		} else if longFormat {
+			objType, objSize := getObjType(fmt.Sprintf("%x", hash))
+			fmt.Printf("%s%s %x\t%d\t%s\n", fileMode, objType, hash, objSize, name)
+		} else {
+			objType, _ := getObjType(fmt.Sprintf("%x", hash))
+			fmt.Printf("%s%s %x\t%s\n", fileMode, objType, hash, name)
+		}
+	}
+}
+
+func getObjType(objName string) (objType string, objSize int64) {
+	objPath := filepath.Join(".git", "objects", objName[:2], objName[2:])
+
+	file, err := os.Open(objPath)
+	if err != nil {
+		fatal(err.Error())
+	}
+	defer file.Close()
+
+	zipReader, err := zlib.NewReader(file)
+	if err != nil {
+		fatal(err.Error())
+	}
+
+	reader := bufio.NewReader(zipReader)
+	objType, _ = reader.ReadString(' ')
+
+	lengthStr, _ := reader.ReadString(0)
+	lengthStr = lengthStr[:len(lengthStr)-1]
+	objSize, _ = strconv.ParseInt(lengthStr, 10, 64)
+
+	return
 }
