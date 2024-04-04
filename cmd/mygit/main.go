@@ -136,7 +136,7 @@ func gitCatFile() {
 
 func gitHashObject() {
 	if len(os.Args) < 3 || (os.Args[2] == "-w" && len(os.Args) < 4) {
-		printUsageAndExit("hash-object -w <object>")
+		printUsageAndExit("hash-object [-w] <object>")
 	}
 
 	var writeObject bool
@@ -205,7 +205,7 @@ func gitHashObject() {
 
 func gitListTree() {
 	if len(os.Args) < 3 || (len(os.Args) == 4 && os.Args[2] != "--name-only" && os.Args[2] != "--object-only" && os.Args[2] != "-l") {
-		printUsageAndExit("ls-tree (-l | --name-only | --object-only) <tree_sha>")
+		printUsageAndExit("ls-tree [(-l | --name-only | --object-only)] <tree_sha>")
 	}
 
 	var nameOnly, objectOnly, longFormat bool
@@ -253,7 +253,7 @@ func gitListTree() {
 	objType = objType[:len(objType)-1]
 
 	if objType != "tree" {
-		fatal("object type not supported: %q\n", objType)
+		fatal("expected a 'tree' node, found: %q\n", objType)
 	}
 
 	lengthStr, err := reader.ReadString(0)
