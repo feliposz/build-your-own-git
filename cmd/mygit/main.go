@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
+	"time"
 )
 
 func main() {
@@ -29,6 +32,8 @@ func main() {
 		gitListTree()
 	case "write-tree":
 		gitWriteTree()
+	case "commit-tree":
+		gitCommitTree()
 	default:
 		fmt.Printf("invalid command: %s\n", os.Args[1])
 		printUsageAndExit("")
@@ -307,25 +312,30 @@ func gitListTree() {
 			}
 			fatal(err.Error())
 		}
+		fileMode = "000000" + fileMode[:len(fileMode)-1]
+		fileMode = fileMode[len(fileMode)-6:]
+
 		name, err := reader.ReadString('\000')
 		if err != nil {
 			fatal(err.Error())
 		}
 		name = name[:len(name)-1]
+
 		_, err = reader.Read(hash)
 		if err != nil {
 			fatal(err.Error())
 		}
+
 		if nameOnly {
 			fmt.Println(name)
 		} else if objectOnly {
 			fmt.Printf("%x\n", hash)
 		} else if longFormat {
 			objType, objSize := getObjTypeAndSize(fmt.Sprintf("%x", hash))
-			fmt.Printf("%s%s %x\t%d\t%s\n", fileMode, objType, hash, objSize, name)
+			fmt.Printf("%s %s %x\t%d\t%s\n", fileMode, objType, hash, objSize, name)
 		} else {
 			objType, _ := getObjTypeAndSize(fmt.Sprintf("%x", hash))
-			fmt.Printf("%s%s %x\t%s\n", fileMode, objType, hash, name)
+			fmt.Printf("%s %s %x\t%s\n", fileMode, objType, hash, name)
 		}
 	}
 }
@@ -346,6 +356,7 @@ func getObjTypeAndSize(objName string) (objType string, objSize int64) {
 
 	reader := bufio.NewReader(zipReader)
 	objType, _ = reader.ReadString(' ')
+	objType = objType[:len(objType)-1]
 
 	lengthStr, _ := reader.ReadString(0)
 	lengthStr = lengthStr[:len(lengthStr)-1]
@@ -420,4 +431,76 @@ func writeTree(path string) []byte {
 	}
 
 	return hashObject(true, "tree", int64(len(content)), content)
+}
+
+func gitCommitTree() {
+	usage := false
+	if len(os.Args) < 3 {
+		usage = true
+	}
+
+	var treeHash, parentHash, message string
+	for i := 0; !usage && i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "-p":
+			if parentHash == "" && i+1 < len(os.Args) {
+				parentHash = os.Args[i+1]
+			} else {
+				usage = true
+			}
+			i++ // skip
+		case "-m":
+			if message == "" && i+1 < len(os.Args) {
+				message = os.Args[i+1]
+			} else {
+				usage = true
+			}
+			i++ // skip
+		default:
+			treeHash = os.Args[i]
+		}
+	}
+
+	if usage {
+		printUsageAndExit("commit-tree <tree_sha> [-p <parent_sha>] [-m <message>]")
+	}
+
+	// make sure tree_sha and parent_sha exists and have the right type
+	treeType, _ := getObjTypeAndSize(treeHash)
+	if treeType != "tree" {
+		fatal("expected '%s' to be a 'tree' object, got: %s", treeHash, treeType)
+	}
+
+	parentType, _ := getObjTypeAndSize(treeHash)
+	if parentType != "tree" {
+		fatal("expected '%s' to be a 'tree' object, got: %s", parentHash, parentType)
+	}
+
+	// TODO: Using "git config" itself to get the config for now...
+	username, email := getGitConfig("user.name"), getGitConfig("user.email")
+	now := time.Now()
+	timestamp := now.Unix()
+	_, tzOffset := now.Zone()
+	tzHours, tzMinutes := tzOffset/3600, (tzOffset/60)%60
+	timezone := tzHours*100 + tzMinutes
+
+	content := fmt.Sprintf("tree %s\n", treeHash)
+	if parentHash != "" {
+		content += fmt.Sprintf("parent %s\n", parentHash)
+	}
+	content += fmt.Sprintf("author %s <%s> %d %+05d\n", username, email, timestamp, timezone)
+	content += fmt.Sprintf("committer %s <%s> %d %+05d\n", username, email, timestamp, timezone)
+	content += fmt.Sprintf("\n%s\n", message)
+
+	commitHash := hashObject(true, "commit", int64(len(content)), []byte(content))
+	fmt.Printf("%x\n", commitHash)
+}
+
+func getGitConfig(key string) string {
+	cmd := exec.Command("git", "config", key)
+	output, err := cmd.Output()
+	if err != nil {
+		fatal(err.Error())
+	}
+	return strings.TrimRight(string(output), "\r\n")
 }
