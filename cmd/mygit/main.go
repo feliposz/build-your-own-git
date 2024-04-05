@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"compress/zlib"
 	"crypto/sha1"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 )
 
@@ -25,6 +27,8 @@ func main() {
 		gitHashObject()
 	case "ls-tree":
 		gitListTree()
+	case "write-tree":
+		gitWriteTree()
 	default:
 		fmt.Printf("invalid command: %s\n", os.Args[1])
 		printUsageAndExit("")
@@ -148,6 +152,10 @@ func gitHashObject() {
 		filename = os.Args[2]
 	}
 
+	fmt.Printf("%x\n", hashFile(writeObject, filename))
+}
+
+func hashFile(writeObject bool, filename string) []byte {
 	file, err := os.Open(filename)
 	if err != nil {
 		fatal(err.Error())
@@ -163,31 +171,43 @@ func gitHashObject() {
 	}
 	fileSize := info.Size()
 
-	payload := []byte(fmt.Sprintf("blob %d\000", fileSize))
 	content := make([]byte, fileSize)
 	_, err = file.Read(content)
 	if err != nil {
 		fatal(err.Error())
 	}
 
+	return hashObject(writeObject, "blob", fileSize, content)
+}
+
+func hashObject(writeObject bool, contentType string, contentSize int64, content []byte) []byte {
+	payload := []byte(fmt.Sprintf("%s %d\000", contentType, contentSize))
+
 	s := sha1.New()
 	s.Write(payload)
 	s.Write(content)
 
-	objName := fmt.Sprintf("%x", s.Sum(nil))
+	hash := s.Sum(nil)
+	objName := fmt.Sprintf("%x", hash)
 
 	if !writeObject {
-		fmt.Println(objName)
-		return
+		return hash
 	}
 
-	objDir := objName[:2]
-	err = os.MkdirAll(filepath.Join(".git", "objects", objDir), 0755)
+	objDir := filepath.Join(".git", "objects", objName[:2])
+	objPath := filepath.Join(objDir, objName[2:])
+
+	// no need to rewrite if contents match (same hash)
+	if fileExists(objPath) {
+		return hash
+	}
+
+	err := os.MkdirAll(objDir, 0755)
 	if err != nil {
 		fatal(err.Error())
 	}
 
-	objFile, err := os.OpenFile(filepath.Join(".git", "objects", objDir, objName[2:]), os.O_CREATE, 0644)
+	objFile, err := os.OpenFile(objPath, os.O_CREATE, 0644)
 	if err != nil {
 		fatal(err.Error())
 	}
@@ -200,7 +220,18 @@ func gitHashObject() {
 		fatal(err.Error())
 	}
 
-	fmt.Println(objName)
+	return hash
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false
+		}
+		fatal(err.Error())
+	}
+	return true
 }
 
 func gitListTree() {
@@ -290,16 +321,16 @@ func gitListTree() {
 		} else if objectOnly {
 			fmt.Printf("%x\n", hash)
 		} else if longFormat {
-			objType, objSize := getObjType(fmt.Sprintf("%x", hash))
+			objType, objSize := getObjTypeAndSize(fmt.Sprintf("%x", hash))
 			fmt.Printf("%s%s %x\t%d\t%s\n", fileMode, objType, hash, objSize, name)
 		} else {
-			objType, _ := getObjType(fmt.Sprintf("%x", hash))
+			objType, _ := getObjTypeAndSize(fmt.Sprintf("%x", hash))
 			fmt.Printf("%s%s %x\t%s\n", fileMode, objType, hash, name)
 		}
 	}
 }
 
-func getObjType(objName string) (objType string, objSize int64) {
+func getObjTypeAndSize(objName string) (objType string, objSize int64) {
 	objPath := filepath.Join(".git", "objects", objName[:2], objName[2:])
 
 	file, err := os.Open(objPath)
@@ -321,4 +352,72 @@ func getObjType(objName string) (objType string, objSize int64) {
 	objSize, _ = strconv.ParseInt(lengthStr, 10, 64)
 
 	return
+}
+
+func gitWriteTree() {
+	if len(os.Args) != 2 {
+		printUsageAndExit("write-tree")
+	}
+
+	cwd, _ := os.Getwd()
+	fmt.Printf("%x\n", writeTree(cwd))
+}
+
+type treeEntry struct {
+	name string
+	mode string
+	hash []byte
+}
+
+func writeTree(path string) []byte {
+	dir, err := os.Open(path)
+	if err != nil {
+		fatal(err.Error())
+	}
+	defer dir.Close()
+
+	if info, _ := dir.Stat(); !info.IsDir() {
+		fatal("not a directory: %s\n", path)
+	}
+
+	entries, err := dir.ReadDir(0)
+	if err != nil {
+		fatal(err.Error())
+	}
+
+	treeEntries := []*treeEntry{}
+
+	for _, entry := range entries {
+		if entry.Name() == ".git" {
+			continue
+		}
+		te := new(treeEntry)
+		te.name = entry.Name()
+		fullPath := filepath.Join(path, te.name)
+		if entry.IsDir() {
+			te.mode = "40000" // directory
+			te.hash = writeTree(fullPath)
+		} else {
+			// 100755 (executable file)
+			// 120000 (symbolic link)
+			te.mode = "100644" // regular file
+			te.hash = hashFile(true, fullPath)
+		}
+		treeEntries = append(treeEntries, te)
+	}
+
+	slices.SortFunc(treeEntries, func(a, b *treeEntry) int {
+		return cmp.Compare(a.name, b.name)
+	})
+
+	content := []byte{}
+	for _, entry := range treeEntries {
+		content = append(content, []byte(entry.mode)...)
+		content = append(content, ' ')
+		content = append(content, []byte(entry.name)...)
+		content = append(content, '\000')
+		content = append(content, entry.hash...)
+	}
+
+	return hashObject(true, "tree", int64(len(content)), content)
 }
