@@ -508,7 +508,7 @@ func getGitConfig(key string) string {
 	return strings.TrimRight(string(output), "\r\n")
 }
 
-func gitClone() {
+func DISABLE_gitClone() {
 	if len(os.Args) < 4 {
 		printUsageAndExit("clone <repo> <dir>")
 	}
@@ -610,12 +610,58 @@ func gitClone() {
 		fatal("could not fetch %q - status code: %d", repoUrl, respGet.StatusCode)
 	}
 
-	contentType = respGet.Header.Get("Content-Type")
-	if contentType != "application/x-git-upload-pack-result" {
-		fatal("unexpected content type: %q", contentType)
-	}
+	// contentType = respGet.Header.Get("Content-Type")
+	// if contentType != "application/x-git-upload-pack-result" {
+	// 	fatal("unexpected content type: %q", contentType)
+	// }
 
 	// TODO: decode the pack file
 
-	//io.Copy(os.Stdout, respPost.Body)
+	nakExpected := []byte("0008NAK\n")
+	nakHeader := make([]byte, 8)
+	_, err = respPost.Body.Read(nakHeader)
+	if err != nil {
+		fatal(err.Error())
+	}
+	if slices.Compare(nakExpected, nakHeader) != 0 {
+		fatal("unexpected header on response. got: %q - want: %q\n", nakHeader, nakExpected)
+	}
+
+	file, err := os.Create("example.pack")
+	if err != nil {
+		fatal(err.Error())
+	}
+	defer file.Close()
+
+	io.Copy(file, respPost.Body)
+	fmt.Println("result saved to file example.pack")
+}
+
+func gitClone() {
+	fmt.Println("skipped fetch, loading example.pack")
+	reader, err := os.Open("example.pack")
+	if err != nil {
+		fatal(err.Error())
+	}
+	defer reader.Close()
+
+	// begin reading the pack file now
+	packHeader := make([]byte, 12)
+	_, err = reader.Read(packHeader)
+	if err != nil {
+		fatal(err.Error())
+	}
+	if slices.Compare(packHeader[:4], []byte("PACK")) != 0 {
+		fatal("invalid PACK header")
+	}
+	version := bigEndianBytesToUint(packHeader[4:8])
+	objCount := bigEndianBytesToUint(packHeader[8:12])
+	fmt.Println(version, objCount)
+
+	// for objIndex := 0; objIndex < int(objCount); objIndex++ {
+	// }
+}
+
+func bigEndianBytesToUint(b []byte) uint {
+	return uint(b[0])<<24 | uint(b[1])<<16 | uint(b[2])<<8 | uint(b[3])
 }
