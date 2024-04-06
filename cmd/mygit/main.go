@@ -668,6 +668,19 @@ func gitClone() {
 	objCount := bigEndianBytesToUint(packHeader[8:12])
 	fmt.Println(version, objCount)
 
+	// TODO: refactor gitInit to accept parameter to new directory
+	// TODO: make new directory
+	// TODO: initialize .git on the new directory
+
+	// TEMP: initialize on the test dir for now
+	gitInit()
+
+	// TODO: save deltas to apply after unpacking
+	// TODO: hash objects read from pack file
+	// TODO: apply deltas
+	// TODO: write HEAD
+	// TODO: "checkout" files to workdir
+
 	offset := uint64(12)
 	objRefDelta := make([]byte, 20)
 	for index := 0; index < int(objCount); index++ {
@@ -727,6 +740,17 @@ func gitClone() {
 		}
 
 		fmt.Printf("\tcontent=%q\n", uncompressedBuffer[:actualSize])
+
+		switch objType {
+		case OBJ_BLOB:
+			hashObject(true, "blob", int64(actualSize), uncompressedBuffer[:actualSize])
+		case OBJ_TREE:
+			hashObject(true, "tree", int64(actualSize), uncompressedBuffer[:actualSize])
+		case OBJ_COMMIT:
+			hashObject(true, "commit", int64(actualSize), uncompressedBuffer[:actualSize])
+		case OBJ_TAG:
+			hashObject(true, "tag", int64(actualSize), uncompressedBuffer[:actualSize])
+		}
 
 		reader.Discard(int(compressedBytesRead))
 		offset += uint64(lenghtBytesRead + compressedBytesRead)
