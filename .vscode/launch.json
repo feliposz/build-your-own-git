@@ -11,7 +11,8 @@
             "request": "launch",
             "mode": "auto",
             "program": "${fileDirname}",
-            "cwd": "test.dir"
+            "cwd": "test.dir",
+            "args": ["clone", "https://github.com/codecrafters-io/git-sample-3", "test_dir"]
         }
     ]
 }

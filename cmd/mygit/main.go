@@ -7,6 +7,7 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,6 +35,8 @@ func main() {
 		gitWriteTree()
 	case "commit-tree":
 		gitCommitTree()
+	case "clone":
+		gitClone()
 	default:
 		fmt.Printf("invalid command: %s\n", os.Args[1])
 		printUsageAndExit("")
@@ -503,4 +506,116 @@ func getGitConfig(key string) string {
 		fatal(err.Error())
 	}
 	return strings.TrimRight(string(output), "\r\n")
+}
+
+func gitClone() {
+	if len(os.Args) < 4 {
+		printUsageAndExit("clone <repo> <dir>")
+	}
+
+	repoUrl := os.Args[2]
+	directory := os.Args[3]
+	_ = directory
+
+	respGet, err := http.Get(repoUrl + "/info/refs?service=git-upload-pack")
+	if err != nil {
+		fatal(err.Error())
+	}
+	defer respGet.Body.Close()
+
+	if respGet.StatusCode != 200 {
+		fatal("could not fetch %q - status code: %d", repoUrl, respGet.StatusCode)
+	}
+
+	contentType := respGet.Header.Get("Content-Type")
+	if contentType != "application/x-git-upload-pack-advertisement" {
+		fatal("unexpected content type: %q", contentType)
+	}
+
+	refs := map[string]string{}
+
+	// start parsing the pack response
+	sizeBuffer := make([]byte, 4)
+	for {
+		_, err := respGet.Body.Read(sizeBuffer)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			fatal(err.Error())
+		}
+
+		size, err := strconv.ParseUint(string(sizeBuffer), 16, 32)
+		if err != nil {
+			fatal(err.Error())
+		}
+
+		if size > 4 {
+			dataBuffer := make([]byte, size-4)
+			_, err = respGet.Body.Read(dataBuffer)
+			if err != nil {
+				fatal(err.Error())
+			}
+
+			fmt.Printf("size=%d data=%q\n", size, string(dataBuffer))
+
+			// strip newline
+			data := string(dataBuffer)
+			if data[len(data)-1] == '\n' {
+				data = data[:len(data)-1]
+			}
+
+			if data[0] == '#' {
+				if data != "# service=git-upload-pack" {
+					fatal("unexpected header: %q", data)
+				}
+			} else {
+				hash := data[:40]
+				// ignore whitespace
+				parts := strings.Split(data[41:], "\000")
+				ref := parts[0]
+				if len(parts) > 1 {
+					capabilities := strings.Split(parts[1], " ")
+					for _, capability := range capabilities {
+						fmt.Printf("capability: %s\n", capability)
+					}
+				}
+				fmt.Printf("hash=%s ref=%s\n", hash, ref)
+				refs[ref] = hash
+			}
+		} else {
+			fmt.Printf("size=%d (terminator)\n", size)
+		}
+	}
+
+	for ref, hash := range refs {
+		fmt.Println(ref, hash)
+	}
+
+	if _, ok := refs["HEAD"]; !ok {
+		fatal("no HEAD reference found")
+	}
+
+	fmt.Println("====")
+
+	postHeader := "application/x-git-upload-pack-request"
+	postBody := fmt.Sprintf("0032want %s\n00000009done\n", refs["HEAD"])
+	respPost, err := http.Post(repoUrl+"/git-upload-pack", postHeader, strings.NewReader(postBody))
+	if err != nil {
+		fatal(err.Error())
+	}
+	defer respPost.Body.Close()
+
+	if respGet.StatusCode != 200 {
+		fatal("could not fetch %q - status code: %d", repoUrl, respGet.StatusCode)
+	}
+
+	contentType = respGet.Header.Get("Content-Type")
+	if contentType != "application/x-git-upload-pack-result" {
+		fatal("unexpected content type: %q", contentType)
+	}
+
+	// TODO: decode the pack file
+
+	//io.Copy(os.Stdout, respPost.Body)
 }
