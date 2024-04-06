@@ -122,10 +122,6 @@ func gitCatFile() {
 		return
 	}
 
-	if objType != "blob" {
-		fatal("object type not supported: %q\n", objType)
-	}
-
 	lengthStr, err := reader.ReadString(0)
 	lengthStr = lengthStr[:len(lengthStr)-1]
 	if err != nil {
@@ -645,6 +641,11 @@ const OBJ_TAG = 4
 const OBJ_OFS_DELTA = 6
 const OBJ_REF_DELTA = 7
 
+type objDelta struct {
+	source  []byte
+	content []byte
+}
+
 func gitClone() {
 	fmt.Println("skipped fetch, loading example.pack")
 	file, err := os.Open("example.pack")
@@ -672,17 +673,26 @@ func gitClone() {
 	// TODO: make new directory
 	// TODO: initialize .git on the new directory
 
-	// TEMP: initialize on the test dir for now
+	// TEMP: just purging and recreating everything while testing
+	err = os.RemoveAll("v:/GitHub/feliposz/build-your-own-git-go/test.dir/.git")
+	if err != nil {
+		panic(err)
+	}
+
+	// TEMP: initialize on the test.dir for now
 	gitInit()
 
-	// TODO: save deltas to apply after unpacking
-	// TODO: hash objects read from pack file
+	// save deltas to apply after unpacking
+	savedObjDeltas := []objDelta{}
+
 	// TODO: apply deltas
 	// TODO: write HEAD
 	// TODO: "checkout" files to workdir
 
+	// extract objects from pack file received
+
 	offset := uint64(12)
-	objRefDelta := make([]byte, 20)
+	objRefDeltaHash := make([]byte, 20)
 	for index := 0; index < int(objCount); index++ {
 
 		value, err := reader.ReadByte()
@@ -711,7 +721,7 @@ func gitClone() {
 		if objType == OBJ_OFS_DELTA {
 			fatal("OBJ_OFS_DELTA not implemented yet!")
 		} else if objType == OBJ_REF_DELTA {
-			reader.Read(objRefDelta)
+			reader.Read(objRefDeltaHash)
 		}
 		// NOTE: no idea why reported size is too small in some cases...
 		if informedSize < 1024 {
@@ -736,10 +746,12 @@ func gitClone() {
 		fmt.Printf("\tactual_size=%5d\tcompressed_size=%5d", uint64(actualSize), +compressedBytesRead)
 
 		if objType == OBJ_REF_DELTA {
-			fmt.Printf("\tobjRefDelta=%x", objRefDelta)
+			fmt.Printf("\tobjRefDelta=%x", objRefDeltaHash)
 		}
 
 		fmt.Printf("\tcontent=%q\n", uncompressedBuffer[:actualSize])
+
+		// hash objects and write objects that were read from the pack file
 
 		switch objType {
 		case OBJ_BLOB:
@@ -750,13 +762,87 @@ func gitClone() {
 			hashObject(true, "commit", int64(actualSize), uncompressedBuffer[:actualSize])
 		case OBJ_TAG:
 			hashObject(true, "tag", int64(actualSize), uncompressedBuffer[:actualSize])
+		case OBJ_REF_DELTA:
+			savedObjDeltas = append(savedObjDeltas, objDelta{objRefDeltaHash, uncompressedBuffer[:actualSize]})
 		}
 
 		reader.Discard(int(compressedBytesRead))
 		offset += uint64(lenghtBytesRead + compressedBytesRead)
 	}
+
+	// applying deltas
+
+	for _, savedObjDelta := range savedObjDeltas {
+		source, content := savedObjDelta.source, savedObjDelta.content
+		fmt.Printf("parent=%x\tcontent=%v\n", source, content)
+
+		i := 0
+		sourceSize := uint64(content[i]) & 0b01111111
+		shift := 7
+		for content[i]&0b10000000 != 0 {
+			i++
+			sourceSize |= uint64(content[i]&0b01111111) << shift
+			shift += 7
+		}
+		fmt.Printf("sourceSize=%d\t", sourceSize)
+		i++
+
+		targetSize := uint64(content[i]) & 0b01111111
+		shift = 7
+		for content[i]&0b10000000 != 0 {
+			i++
+			targetSize |= uint64(content[i]&0b01111111) << shift
+			shift += 7
+		}
+		fmt.Printf("targetSize=%d\n", targetSize)
+		i++
+
+		targetBuffer := make([]byte, targetSize)
+
+		sourceType, readSize, sourceBuffer := readObject(source)
+		if sourceType != "blob" || sourceSize != readSize {
+			fatal("unexpected source type/size for delta: got %s/%d - want blob/%d\n", sourceType, readSize, sourceSize)
+		}
+		_, _ = targetBuffer, sourceBuffer
+
+		// iterate on instructions (copy/insert)
+		fmt.Println(i)
+	}
 }
 
 func bigEndianBytesToUint(b []byte) uint {
 	return uint(b[0])<<24 | uint(b[1])<<16 | uint(b[2])<<8 | uint(b[3])
+}
+
+func readObject(hash []byte) (objType string, objSize uint64, content []byte) {
+
+	objPath := filepath.Join(".git", "objects", fmt.Sprintf("%x", hash[:1]), fmt.Sprintf("%x", hash[1:]))
+	file, err := os.Open(objPath)
+	if err != nil {
+		fatal(err.Error())
+	}
+	defer file.Close()
+
+	zipReader, err := zlib.NewReader(file)
+	if err != nil {
+		fatal(err.Error())
+	}
+
+	reader := bufio.NewReader(zipReader)
+	objType, _ = reader.ReadString(' ')
+	objType = objType[:len(objType)-1]
+
+	lengthStr, err := reader.ReadString(0)
+	lengthStr = lengthStr[:len(lengthStr)-1]
+	if err != nil {
+		fatal(err.Error())
+	}
+	objSize, _ = strconv.ParseUint(lengthStr, 10, 64)
+
+	content = make([]byte, objSize)
+	_, err = reader.Read(content)
+	if err != nil {
+		fatal(err.Error())
+	}
+	return
 }
