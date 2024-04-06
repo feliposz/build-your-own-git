@@ -669,46 +669,43 @@ func gitClone() {
 	fmt.Println(version, objCount)
 
 	offset := uint64(12)
+	objRefDelta := make([]byte, 20)
 	for index := 0; index < int(objCount); index++ {
 
-		prefix, err := reader.ReadByte()
+		value, err := reader.ReadByte()
 		lenghtBytesRead := uint64(1)
 		if err != nil {
 			fatal(err.Error())
 		}
 
-		var objType int
-		var informedSize uint64
-		if prefix&0b10000000 == 0 { // prefix is a single byte length between 0-127
-			informedSize = uint64(prefix)
-		} else {
-			// prefix is a multi-byte length
-			objType = int(prefix&0b01110000) >> 4
-			informedSize = uint64(prefix & 0b00001111)
-			shift := 4
-			for {
-				value, err := reader.ReadByte()
-				lenghtBytesRead++
-				if err != nil {
-					fatal(err.Error())
-				}
-				informedSize = informedSize | uint64(value&0b01111111)<<shift
-				if value&0b10000000 == 0 {
-					break
-				}
-				shift += 7
+		objType := (value >> 4) & 0b00000111
+		informedSize := uint64(value & 0b00001111)
+		shift := 4
+		for value&0b10000000 != 0 {
+			value, err = reader.ReadByte()
+			lenghtBytesRead++
+			if err != nil {
+				fatal(err.Error())
 			}
+			informedSize = informedSize | uint64(value&0b01111111)<<shift
+			if value&0b10000000 == 0 {
+				break
+			}
+			shift += 7
 		}
+
 		fmt.Printf("index=%2d\ttype=%d\toffset=%5d\tsize=%5d", index, objType, offset, informedSize)
-		if objType == 6 || objType == 7 {
-			fatal("not implemented yet!")
+		if objType == OBJ_OFS_DELTA {
+			fatal("OBJ_OFS_DELTA not implemented yet!")
+		} else if objType == OBJ_REF_DELTA {
+			reader.Read(objRefDelta)
 		}
 		// NOTE: no idea why reported size is too small in some cases...
 		if informedSize < 1024 {
 			informedSize = 1024
 		}
 		compressedBuffer, err := reader.Peek(int(informedSize))
-		if err != nil {
+		if err != nil && err != io.EOF {
 			fatal(err.Error())
 		}
 		bytesBuffer := bytes.NewReader(compressedBuffer)
@@ -722,9 +719,14 @@ func gitClone() {
 			fatal(err.Error())
 		}
 
-		//bytesRead, _ := bytesBuffer.Seek(0, io.SeekCurrent)
 		compressedBytesRead := uint64(bytesBuffer.Size() - int64(bytesBuffer.Len()))
-		fmt.Printf("\tactual_size=%5d\tcompressed_size=%5d\n", uint64(actualSize), +compressedBytesRead)
+		fmt.Printf("\tactual_size=%5d\tcompressed_size=%5d", uint64(actualSize), +compressedBytesRead)
+
+		if objType == OBJ_REF_DELTA {
+			fmt.Printf("\tobjRefDelta=%x", objRefDelta)
+		}
+
+		fmt.Printf("\tcontent=%q\n", uncompressedBuffer[:actualSize])
 
 		reader.Discard(int(compressedBytesRead))
 		offset += uint64(lenghtBytesRead + compressedBytesRead)
