@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"cmp"
 	"compress/zlib"
 	"crypto/sha1"
@@ -637,13 +638,22 @@ func DISABLE_gitClone() {
 	fmt.Println("result saved to file example.pack")
 }
 
+const OBJ_COMMIT = 1
+const OBJ_TREE = 2
+const OBJ_BLOB = 3
+const OBJ_TAG = 4
+const OBJ_OFS_DELTA = 6
+const OBJ_REF_DELTA = 7
+
 func gitClone() {
 	fmt.Println("skipped fetch, loading example.pack")
-	reader, err := os.Open("example.pack")
+	file, err := os.Open("example.pack")
 	if err != nil {
 		fatal(err.Error())
 	}
-	defer reader.Close()
+	defer file.Close()
+
+	reader := bufio.NewReader(file)
 
 	// begin reading the pack file now
 	packHeader := make([]byte, 12)
@@ -658,8 +668,67 @@ func gitClone() {
 	objCount := bigEndianBytesToUint(packHeader[8:12])
 	fmt.Println(version, objCount)
 
-	// for objIndex := 0; objIndex < int(objCount); objIndex++ {
-	// }
+	offset := uint64(12)
+	for index := 0; index < int(objCount); index++ {
+
+		prefix, err := reader.ReadByte()
+		lenghtBytesRead := uint64(1)
+		if err != nil {
+			fatal(err.Error())
+		}
+
+		var objType int
+		var informedSize uint64
+		if prefix&0b10000000 == 0 { // prefix is a single byte length between 0-127
+			informedSize = uint64(prefix)
+		} else {
+			// prefix is a multi-byte length
+			objType = int(prefix&0b01110000) >> 4
+			informedSize = uint64(prefix & 0b00001111)
+			shift := 4
+			for {
+				value, err := reader.ReadByte()
+				lenghtBytesRead++
+				if err != nil {
+					fatal(err.Error())
+				}
+				informedSize = informedSize | uint64(value&0b01111111)<<shift
+				if value&0b10000000 == 0 {
+					break
+				}
+				shift += 7
+			}
+		}
+		fmt.Printf("index=%2d\ttype=%d\toffset=%5d\tsize=%5d", index, objType, offset, informedSize)
+		if objType == 6 || objType == 7 {
+			fatal("not implemented yet!")
+		}
+		// NOTE: no idea why reported size is too small in some cases...
+		if informedSize < 1024 {
+			informedSize = 1024
+		}
+		compressedBuffer, err := reader.Peek(int(informedSize))
+		if err != nil {
+			fatal(err.Error())
+		}
+		bytesBuffer := bytes.NewReader(compressedBuffer)
+		zreader, err := zlib.NewReader(bytesBuffer)
+		if err != nil {
+			fatal(err.Error())
+		}
+		uncompressedBuffer := make([]byte, informedSize)
+		actualSize, err := zreader.Read(uncompressedBuffer)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			fatal(err.Error())
+		}
+
+		//bytesRead, _ := bytesBuffer.Seek(0, io.SeekCurrent)
+		compressedBytesRead := uint64(bytesBuffer.Size() - int64(bytesBuffer.Len()))
+		fmt.Printf("\tactual_size=%5d\tcompressed_size=%5d\n", uint64(actualSize), +compressedBytesRead)
+
+		reader.Discard(int(compressedBytesRead))
+		offset += uint64(lenghtBytesRead + compressedBytesRead)
+	}
 }
 
 func bigEndianBytesToUint(b []byte) uint {
