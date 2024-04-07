@@ -624,14 +624,14 @@ func DISABLE_gitClone() {
 		fatal("unexpected header on response. got: %q - want: %q\n", nakHeader, nakExpected)
 	}
 
-	file, err := os.Create("example.pack")
+	file, err := os.Create(directory + ".pack")
 	if err != nil {
 		fatal(err.Error())
 	}
 	defer file.Close()
 
 	io.Copy(file, respPost.Body)
-	fmt.Println("result saved to file example.pack")
+	fmt.Printf("result saved to file %s.pack\n", directory)
 }
 
 const OBJ_COMMIT = 1
@@ -647,8 +647,9 @@ type objDelta struct {
 }
 
 func gitClone() {
-	fmt.Println("skipped fetch, loading example.pack")
-	file, err := os.Open("example.pack")
+	directory := os.Args[3]
+	fmt.Printf("skipped fetch, loading %s.pack\n", directory)
+	file, err := os.Open(directory + ".pack")
 	if err != nil {
 		fatal(err.Error())
 	}
@@ -669,31 +670,39 @@ func gitClone() {
 	objCount := bigEndianBytesToUint(packHeader[8:12])
 	fmt.Println(version, objCount)
 
-	// TODO: refactor gitInit to accept parameter to new directory
-	// TODO: make new directory
-	// TODO: initialize .git on the new directory
-
 	// TEMP: just purging and recreating everything while testing
-	err = os.RemoveAll("v:/GitHub/feliposz/build-your-own-git-go/test.dir/.git")
+	err = os.RemoveAll("v:/GitHub/feliposz/build-your-own-git-go/test.dir/" + directory)
 	if err != nil {
 		panic(err)
 	}
 
-	// TEMP: initialize on the test.dir for now
+	// TODO: refactor gitInit to accept parameter to new directory
+	// TEMP: make new directory and initialize .git on the new directory
+	os.Mkdir(directory, 0755)
+	os.Chdir(directory)
 	gitInit()
+
+	// TODO: write HEAD and refs
+	// TEMP: forcing a specific HEAD for testing (should use the one informed on discovery, as well as branch name!)
+	os.MkdirAll(filepath.Join(".git", "refs", "heads"), 0755)
+	switch directory {
+	case "git-sample-1":
+		os.WriteFile(filepath.Join(".git", "refs", "heads", "master"), []byte("47b37f1a82bfe85f6d8df52b6258b75e4343b7fd"), 0644)
+	case "git-sample-2":
+		os.WriteFile(filepath.Join(".git", "refs", "heads", "master"), []byte("7b8eb72b9dfa14a28ed22d7618b3cdecaa5d5be0"), 0644)
+	case "git-sample-3":
+		os.WriteFile(filepath.Join(".git", "refs", "heads", "master"), []byte("23f0bc3b5c7c3108e41c448f01a3db31e7064bbb"), 0644)
+	}
 
 	// save deltas to apply after unpacking
 	savedObjDeltas := []objDelta{}
 
-	// TODO: apply deltas
-	// TODO: write HEAD
-	// TODO: "checkout" files to workdir
-
-	// extract objects from pack file received
+	// extracting objects from pack file received
 
 	offset := uint64(12)
-	objRefDeltaHash := make([]byte, 20)
 	for index := 0; index < int(objCount); index++ {
+
+		var objRefDeltaHash []byte
 
 		value, err := reader.ReadByte()
 		lenghtBytesRead := uint64(1)
@@ -721,6 +730,7 @@ func gitClone() {
 		if objType == OBJ_OFS_DELTA {
 			fatal("OBJ_OFS_DELTA not implemented yet!")
 		} else if objType == OBJ_REF_DELTA {
+			objRefDeltaHash = make([]byte, 20)
 			reader.Read(objRefDeltaHash)
 		}
 		// NOTE: no idea why reported size is too small in some cases...
@@ -802,10 +812,9 @@ func gitClone() {
 
 		sourceType, readSize, sourceBuffer := readObject(sourceHash)
 		// TODO: are other types allowed here?
-		if sourceType != "blob" || sourceSize != readSize {
-			fatal("unexpected source type/size for delta: got %s/%d - want blob/%d\n", sourceType, readSize, sourceSize)
+		if sourceSize != readSize {
+			fatal("unexpected source size for delta: got %d - want %d\n", readSize, sourceSize)
 		}
-		_, _ = targetBuffer, sourceBuffer
 
 		var sourceIndex, targetIndex uint32
 
@@ -868,6 +877,8 @@ func gitClone() {
 		targetHash := hashObject(true, sourceType, int64(targetSize), targetBuffer)
 		fmt.Printf("delta applied source: %x target: %x\n", sourceHash, targetHash)
 	}
+
+	// TODO: "checkout" files to workdir
 }
 
 func bigEndianBytesToUint(b []byte) uint {
