@@ -771,10 +771,11 @@ func gitClone() {
 	}
 
 	// applying deltas
+	// reference: https://codewords.recurse.com/issues/three/unpacking-git-packfiles#applying-deltas
 
 	for _, savedObjDelta := range savedObjDeltas {
-		source, content := savedObjDelta.source, savedObjDelta.content
-		fmt.Printf("parent=%x\tcontent=%v\n", source, content)
+		sourceHash, content := savedObjDelta.source, savedObjDelta.content
+		fmt.Printf("parent=%x\tcontent=%v\n", sourceHash, content)
 
 		i := 0
 		sourceSize := uint64(content[i]) & 0b01111111
@@ -799,14 +800,73 @@ func gitClone() {
 
 		targetBuffer := make([]byte, targetSize)
 
-		sourceType, readSize, sourceBuffer := readObject(source)
+		sourceType, readSize, sourceBuffer := readObject(sourceHash)
+		// TODO: are other types allowed here?
 		if sourceType != "blob" || sourceSize != readSize {
 			fatal("unexpected source type/size for delta: got %s/%d - want blob/%d\n", sourceType, readSize, sourceSize)
 		}
 		_, _ = targetBuffer, sourceBuffer
 
+		var sourceIndex, targetIndex uint32
+
 		// iterate on instructions (copy/insert)
-		fmt.Println(i)
+		for i < len(content) {
+			op := content[i] >> 7
+			if op == 1 { // copy operation
+
+				// decode which bytes to read that are non-zero from the copy instruction
+				lengthBitmap := content[i] >> 4 & 0b0000111
+				offsetBitmap := content[i] & 0b00001111
+				i++
+
+				offset, length := uint32(0), uint32(0)
+
+				if offsetBitmap&0b0001 != 0 {
+					offset |= uint32(content[i])
+					i++
+				}
+				if offsetBitmap&0b0010 != 0 {
+					offset |= uint32(content[i]) << 8
+					i++
+				}
+				if offsetBitmap&0b0100 != 0 {
+					offset |= uint32(content[i]) << 16
+					i++
+				}
+				if offsetBitmap&0b1000 != 0 {
+					offset |= uint32(content[i]) << 24
+					i++
+				}
+
+				if lengthBitmap&0b0001 != 0 {
+					length |= uint32(content[i])
+					i++
+				}
+				if lengthBitmap&0b0010 != 0 {
+					length |= uint32(content[i]) << 8
+					i++
+				}
+				if lengthBitmap&0b0100 != 0 {
+					length |= uint32(content[i]) << 16
+					i++
+				}
+
+				sourceIndex = offset
+				fmt.Printf("copying %d:%d into %d:%d\n", sourceIndex, sourceIndex+length, targetIndex, targetIndex+length)
+				copy(targetBuffer[targetIndex:targetIndex+length], sourceBuffer[sourceIndex:sourceIndex+length])
+				targetIndex += length
+			} else { // insert operation
+				length := uint32(content[i]) // length is on the operation itself 0-127
+				i++
+				fmt.Printf("inserting %d bytes into %d:%d\n", length, targetIndex, targetIndex+length)
+				copy(targetBuffer[targetIndex:targetIndex+length], content[i:i+int(length)])
+				targetIndex += length
+				i += int(length)
+			}
+		}
+
+		targetHash := hashObject(true, sourceType, int64(targetSize), targetBuffer)
+		fmt.Printf("delta applied source: %x target: %x\n", sourceHash, targetHash)
 	}
 }
 
