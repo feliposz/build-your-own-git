@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"compress/zlib"
 	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -55,7 +56,7 @@ func printUsageAndExit(command string) {
 }
 
 func fatal(msg string, args ...any) {
-	fmt.Printf(msg, args...)
+	fmt.Fprintf(os.Stderr, msg, args...)
 	os.Exit(128)
 }
 
@@ -63,7 +64,7 @@ func gitInit() {
 	initialDirectories := []string{".git", ".git/objects", ".git/refs"}
 	for _, directory := range initialDirectories {
 		err := os.Mkdir(directory, 0755)
-		if err != nil {
+		if err != nil && !os.IsExist(err) {
 			fatal("error creating directory %s: %s", directory, err)
 		}
 	}
@@ -684,15 +685,17 @@ func gitClone() {
 
 	// TODO: write HEAD and refs
 	// TEMP: forcing a specific HEAD for testing (should use the one informed on discovery, as well as branch name!)
-	os.MkdirAll(filepath.Join(".git", "refs", "heads"), 0755)
+	var head []byte
 	switch directory {
 	case "git-sample-1":
-		os.WriteFile(filepath.Join(".git", "refs", "heads", "master"), []byte("47b37f1a82bfe85f6d8df52b6258b75e4343b7fd"), 0644)
+		head = []byte("47b37f1a82bfe85f6d8df52b6258b75e4343b7fd")
 	case "git-sample-2":
-		os.WriteFile(filepath.Join(".git", "refs", "heads", "master"), []byte("7b8eb72b9dfa14a28ed22d7618b3cdecaa5d5be0"), 0644)
+		head = []byte("7b8eb72b9dfa14a28ed22d7618b3cdecaa5d5be0")
 	case "git-sample-3":
-		os.WriteFile(filepath.Join(".git", "refs", "heads", "master"), []byte("23f0bc3b5c7c3108e41c448f01a3db31e7064bbb"), 0644)
+		head = []byte("23f0bc3b5c7c3108e41c448f01a3db31e7064bbb")
 	}
+	os.MkdirAll(filepath.Join(".git", "refs", "heads"), 0755)
+	os.WriteFile(filepath.Join(".git", "refs", "heads", "master"), head, 0644)
 
 	// save deltas to apply after unpacking
 	savedObjDeltas := []objDelta{}
@@ -878,7 +881,9 @@ func gitClone() {
 		fmt.Printf("delta applied source: %x target: %x\n", sourceHash, targetHash)
 	}
 
-	// TODO: "checkout" files to workdir
+	// "checkout" files to workdir
+	hash, _ := hex.DecodeString(string(head))
+	checkoutCommit(hash)
 }
 
 func bigEndianBytesToUint(b []byte) uint {
@@ -912,8 +917,91 @@ func readObject(hash []byte) (objType string, objSize uint64, content []byte) {
 
 	content = make([]byte, objSize)
 	_, err = reader.Read(content)
-	if err != nil {
+	if err != nil && err != io.EOF {
 		fatal(err.Error())
 	}
 	return
+}
+
+func checkoutCommit(head []byte) {
+	objType, _, content := readObject(head)
+	if objType != "commit" {
+		fatal("expected 'commit' type, got: %s\n", objType)
+	}
+	reader := bufio.NewReader(bytes.NewReader(content))
+	reader.ReadString(' ')
+	treeHash, _ := reader.ReadString('\n')
+	hash, _ := hex.DecodeString(treeHash)
+
+	// TODO: make sure directory is empty
+	root, err := os.Getwd()
+	if err != nil {
+		fatal(err.Error())
+	}
+	checkoutTree(hash, root)
+}
+
+func checkoutTree(tree []byte, path string) {
+	fmt.Printf("dir: %s\n", path)
+
+	os.MkdirAll(path, 0755)
+
+	objType, _, content := readObject(tree)
+	if objType != "tree" {
+		fatal("expected 'tree' type, got: %s\n", objType)
+	}
+	reader := bufio.NewReader(bytes.NewReader(content))
+
+	for {
+		fileMode, err := reader.ReadString(' ')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			fatal(err.Error())
+		}
+		fileMode = "000000" + fileMode[:len(fileMode)-1]
+		fileMode = fileMode[len(fileMode)-6:]
+
+		name, err := reader.ReadString('\000')
+		if err != nil {
+			fatal(err.Error())
+		}
+		name = name[:len(name)-1]
+
+		hash := make([]byte, 20)
+		_, err = reader.Read(hash)
+		if err != nil {
+			fatal(err.Error())
+		}
+
+		switch fileMode {
+		case "100644":
+			checkoutFile(hash, filepath.Join(path, name))
+		case "040000":
+			checkoutTree(hash, filepath.Join(path, name))
+		default:
+			fmt.Printf("unknown file mode: %s skipping: %s (%x)\n", fileMode, name, hash)
+		}
+	}
+}
+
+func checkoutFile(hash []byte, path string) {
+	fmt.Printf("file: %s\n", path)
+
+	objType, _, content := readObject(hash)
+	if objType != "blob" {
+		fatal("expected 'blob' type, got: %s\n", objType)
+	}
+
+	file, err := os.Create(path)
+	if err != nil {
+		fatal(err.Error())
+	}
+	defer file.Close()
+
+	_, err = file.Write(content)
+	if err != nil {
+		fatal(err.Error())
+	}
 }
