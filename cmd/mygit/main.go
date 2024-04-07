@@ -506,15 +506,32 @@ func getGitConfig(key string) string {
 	return strings.TrimRight(string(output), "\r\n")
 }
 
-func DISABLE_gitClone() {
+func gitClone() {
 	if len(os.Args) < 4 {
 		printUsageAndExit("clone <repo> <dir>")
 	}
 
 	repoUrl := os.Args[2]
 	directory := os.Args[3]
-	_ = directory
 
+	// TODO: refactor gitInit to accept parameter to new directory
+	// TEMP: make new directory and initialize .git
+	os.Mkdir(directory, 0755)
+	os.Chdir(directory)
+	gitInit()
+
+	packContent, head := fetchGitPack(repoUrl)
+
+	os.MkdirAll(filepath.Join(".git", "refs", "heads"), 0755)
+	os.WriteFile(filepath.Join(".git", "refs", "heads", "master"), []byte(head), 0644)
+
+	unpackObjects(packContent)
+	// "checkout" files to workdir
+	headHash, _ := hex.DecodeString(string(head))
+	checkoutCommit(headHash)
+}
+
+func fetchGitPack(repoUrl string) (packContent []byte, head string) {
 	respGet, err := http.Get(repoUrl + "/info/refs?service=git-upload-pack")
 	if err != nil {
 		fatal(err.Error())
@@ -590,7 +607,8 @@ func DISABLE_gitClone() {
 		fmt.Println(ref, hash)
 	}
 
-	if _, ok := refs["HEAD"]; !ok {
+	var ok bool
+	if head, ok = refs["HEAD"]; !ok {
 		fatal("no HEAD reference found")
 	}
 
@@ -608,13 +626,6 @@ func DISABLE_gitClone() {
 		fatal("could not fetch %q - status code: %d", repoUrl, respGet.StatusCode)
 	}
 
-	// contentType = respGet.Header.Get("Content-Type")
-	// if contentType != "application/x-git-upload-pack-result" {
-	// 	fatal("unexpected content type: %q", contentType)
-	// }
-
-	// TODO: decode the pack file
-
 	nakExpected := []byte("0008NAK\n")
 	nakHeader := make([]byte, 8)
 	_, err = respPost.Body.Read(nakHeader)
@@ -625,14 +636,11 @@ func DISABLE_gitClone() {
 		fatal("unexpected header on response. got: %q - want: %q\n", nakHeader, nakExpected)
 	}
 
-	file, err := os.Create(directory + ".pack")
+	packContent, err = io.ReadAll(respPost.Body)
 	if err != nil {
 		fatal(err.Error())
 	}
-	defer file.Close()
-
-	io.Copy(file, respPost.Body)
-	fmt.Printf("result saved to file %s.pack\n", directory)
+	return
 }
 
 const OBJ_COMMIT = 1
@@ -647,20 +655,12 @@ type objDelta struct {
 	content []byte
 }
 
-func gitClone() {
-	directory := os.Args[3]
-	fmt.Printf("skipped fetch, loading %s.pack\n", directory)
-	file, err := os.Open(directory + ".pack")
-	if err != nil {
-		fatal(err.Error())
-	}
-	defer file.Close()
-
-	reader := bufio.NewReader(file)
+func unpackObjects(packContent []byte) {
+	reader := bufio.NewReader(bytes.NewReader(packContent))
 
 	// begin reading the pack file now
 	packHeader := make([]byte, 12)
-	_, err = reader.Read(packHeader)
+	_, err := reader.Read(packHeader)
 	if err != nil {
 		fatal(err.Error())
 	}
@@ -670,32 +670,6 @@ func gitClone() {
 	version := bigEndianBytesToUint(packHeader[4:8])
 	objCount := bigEndianBytesToUint(packHeader[8:12])
 	fmt.Println(version, objCount)
-
-	// TEMP: just purging and recreating everything while testing
-	err = os.RemoveAll("v:/GitHub/feliposz/build-your-own-git-go/test.dir/" + directory)
-	if err != nil {
-		panic(err)
-	}
-
-	// TODO: refactor gitInit to accept parameter to new directory
-	// TEMP: make new directory and initialize .git on the new directory
-	os.Mkdir(directory, 0755)
-	os.Chdir(directory)
-	gitInit()
-
-	// TODO: write HEAD and refs
-	// TEMP: forcing a specific HEAD for testing (should use the one informed on discovery, as well as branch name!)
-	var head []byte
-	switch directory {
-	case "git-sample-1":
-		head = []byte("47b37f1a82bfe85f6d8df52b6258b75e4343b7fd")
-	case "git-sample-2":
-		head = []byte("7b8eb72b9dfa14a28ed22d7618b3cdecaa5d5be0")
-	case "git-sample-3":
-		head = []byte("23f0bc3b5c7c3108e41c448f01a3db31e7064bbb")
-	}
-	os.MkdirAll(filepath.Join(".git", "refs", "heads"), 0755)
-	os.WriteFile(filepath.Join(".git", "refs", "heads", "master"), head, 0644)
 
 	// save deltas to apply after unpacking
 	savedObjDeltas := []objDelta{}
@@ -880,10 +854,6 @@ func gitClone() {
 		targetHash := hashObject(true, sourceType, int64(targetSize), targetBuffer)
 		fmt.Printf("delta applied source: %x target: %x\n", sourceHash, targetHash)
 	}
-
-	// "checkout" files to workdir
-	hash, _ := hex.DecodeString(string(head))
-	checkoutCommit(hash)
 }
 
 func bigEndianBytesToUint(b []byte) uint {
